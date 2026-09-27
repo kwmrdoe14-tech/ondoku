@@ -78,6 +78,11 @@ textarea{min-height:180px;resize:vertical;font-family:ui-monospace,Menlo,Consola
 
 /* recording */
 .recbox{text-align:center;padding:10px 0 4px}
+.showopts{display:flex;flex-wrap:wrap;justify-content:center;align-items:center;gap:6px 14px;font-size:14px;color:var(--sub);margin:4px 0 12px}
+.showopts label{display:inline-flex;align-items:center;gap:5px;margin:0;font-size:14px;color:var(--ink);cursor:pointer}
+.showopts input{width:18px;height:18px}
+.sc.hid .v{font-size:18px;color:var(--sub);font-weight:600}
+.reveal{text-align:center;margin:6px 0 10px}
 .meter{height:10px;background:#e6e9ef;border-radius:6px;overflow:hidden;max-width:360px;margin:12px auto 6px}
 .meter i{display:block;height:100%;width:0;background:linear-gradient(90deg,#39c16c,#f2b300,#d93025);transition:width .08s}
 .recdot{display:inline-block;width:12px;height:12px;border-radius:50%;background:var(--ng);animation:blink 1s infinite;vertical-align:middle;margin-right:6px}
@@ -194,6 +199,11 @@ table.tbl{width:100%;border-collapse:collapse;font-size:13px}
       </div>
       <div class="passage" id="readText" style="margin-top:8px"></div>
       <div id="stIdle" class="recbox">
+        <div class="showopts">表示する評価：
+          <label><input type="checkbox" id="showPron"> (1) 発音</label>
+          <label><input type="checkbox" id="showFlu"> (2) 流暢さ</label>
+          <label><input type="checkbox" id="showPhr"> (3) 区切り・間</label>
+        </div>
         <button class="btn pri big" id="btnListen">🎤 聞き取る</button>
         <p class="muted">ボタンを押してから、英文を音読してください。最後まで読むか「聞き取り終わり」を押すと評価が表示されます。</p>
       </div>
@@ -213,6 +223,7 @@ table.tbl{width:100%;border-collapse:collapse;font-size:13px}
         <span><span class="lg-y">黄色</span> 流暢さが下がっている部分</span>
         <span><span class="lg-u">赤い下線</span> 不自然な区切り・間</span>
       </div>
+      <div class="reveal" id="revealBox"></div>
       <div class="detail" id="resDetail"></div>
       <div class="actions">
         <button class="btn" id="btnPlayMine">🔁 今の音読を聞き返す</button>
@@ -299,7 +310,7 @@ table.tbl{width:100%;border-collapse:collapse;font-size:13px}
   <div class="card">
     <h2>AI（単語の意味・和訳の自動生成）</h2>
     <label>サービス</label>
-    <select id="aiProv"><option value="anthropic">Claude（Anthropic API）</option><option value="openai">OpenAI API</option></select>
+    <select id="aiProv"><option value="gemini">Gemini（Google AI Studio・無料枠あり）</option><option value="anthropic">Claude（Anthropic API）</option><option value="openai">OpenAI API</option></select>
     <label>APIキー</label><input type="password" id="aiKey" autocomplete="off">
     <label>モデル名（空欄なら既定）</label><input type="text" id="aiModel" placeholder="">
     <p class="muted">APIキーはこの端末のブラウザにだけ保存されます。生徒の端末には不要です（先生が生成した単語帳を共有リンクで配れます）。</p>
@@ -344,7 +355,7 @@ function fmtDate(ts) { const d = new Date(ts); return `${d.getMonth()+1}/${d.get
 
 /* ================= storage ================= */
 const LS_KEY = 'ondokuTrainer_v1';
-function defaultSettings() { return { engine: 'auto', azureKey: '', azureRegion: 'japaneast', azureVoice: 'en-US-JennyNeural', modelRate: 0.9, browserVoice: '', aiProvider: 'anthropic', aiKey: '', aiModel: '' }; }
+function defaultSettings() { return { engine: 'auto', azureKey: '', azureRegion: 'japaneast', azureVoice: 'en-US-JennyNeural', modelRate: 0.9, browserVoice: '', aiProvider: 'gemini', aiKey: '', aiModel: '' }; }
 function defaultDB() { return { passages: [], selectedId: null, history: {}, tests: {}, settings: defaultSettings() }; }
 function loadDB() {
   try {
@@ -949,7 +960,13 @@ async function aiGenerate(passage) {
 英文：
 ${sents.map((s, i) => `${i + 1}. ${s.text}`).join('\n')}`;
   let text;
-  if (st.aiProvider === 'openai') {
+  if (st.aiProvider === 'gemini') {
+    const model = st.aiModel.trim() || 'gemini-flash-latest';
+    const r = await fetch('https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent', { method: 'POST', headers: { 'content-type': 'application/json', 'x-goog-api-key': st.aiKey.trim() },
+      body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: prompt }] }], generationConfig: { responseMimeType: 'application/json' } }) });
+    const j = await r.json(); if (!r.ok) throw new Error('AIエラー：' + (j.error && j.error.message || r.status));
+    text = ((j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts) || []).map(p => p.text || '').join('');
+  } else if (st.aiProvider === 'openai') {
     const r = await fetch('https://api.openai.com/v1/chat/completions', { method: 'POST', headers: { 'content-type': 'application/json', 'authorization': 'Bearer ' + st.aiKey.trim() },
       body: JSON.stringify({ model: st.aiModel.trim() || 'gpt-4.1-mini', messages: [{ role: 'user', content: prompt }], response_format: { type: 'json_object' } }) });
     const j = await r.json(); if (!r.ok) throw new Error('AIエラー：' + (j.error && j.error.message || r.status));
@@ -1100,6 +1117,7 @@ function renderRead() {
   $('#readNone').style.display = p ? 'none' : ''; $('#readMain').style.display = p ? '' : 'none';
   if (!p) return;
   $('#readTitle').textContent = p.title;
+  Object.entries(SHOW_KEYS).forEach(([k, id]) => { $('#' + id).checked = showSetting(k); });
   const m = engineMode(); $('#engineBadge').textContent = m.startsWith('none') ? '評価エンジン未設定' : engineLabel(m);
   $('#stIdle').style.display = R.phase === 'idle' ? '' : 'none';
   $('#stRec').style.display = R.phase === 'rec' ? '' : 'none';
@@ -1112,6 +1130,9 @@ function renderRead() {
   renderPlayUI();
   renderHistory(p);
 }
+const SHOW_KEYS = { pron: 'showPron', flu: 'showFlu', phr: 'showPhr' };
+function showSetting(k) { const sh = S().show || {}; return sh[k] !== false; }
+function vis(k) { return R.reveal || showSetting(k); }
 function renderPassage(el, p, res) {
   const { toks } = analyzeText(p.text);
   let h = esc(p.text.slice(0, toks.length ? toks[0].start : p.text.length));
@@ -1120,14 +1141,14 @@ function renderPassage(el, p, res) {
     let cls = 'w', title = '';
     if (res) {
       const w = res.words[i];
-      if (w.g === 'B') cls += ' gB'; if (w.g === 'C') cls += ' gC'; if (w.om) cls += ' om';
-      if (res.flu.mark[i]) cls += ' flu';
-      if (phrSet.has(i) || phrSet.has(i - 1)) cls += ' phr';
-      title = w.om ? '読み飛ばし／聞き取れず' : `発音 ${w.sc}点` + (weakPh(w).length ? '／弱い音：' + weakPh(w).map(x => '/' + x.p + '/').join(' ') : '') + (w.heard && canon(w.heard) !== t.c ? `（「${w.heard}」と聞こえました）` : '');
+      if (vis('pron')) { if (w.g === 'B') cls += ' gB'; if (w.g === 'C') cls += ' gC'; if (w.om) cls += ' om'; }
+      if (vis('flu') && res.flu.mark[i]) cls += ' flu';
+      if (vis('phr') && (phrSet.has(i) || phrSet.has(i - 1))) cls += ' phr';
+      if (vis('pron')) title = w.om ? '読み飛ばし／聞き取れず' : `発音 ${w.sc}点` + (weakPh(w).length ? '／弱い音：' + weakPh(w).map(x => '/' + x.p + '/').join(' ') : '') + (w.heard && canon(w.heard) !== t.c ? `（「${w.heard}」と聞こえました）` : '');
     }
     h += `<span class="${cls}" data-i="${i}"${title ? ` title="${esc(title)}"` : ''}>${esc(t.text)}</span>`;
     let gcls = '';
-    if (res && i < toks.length - 1) { if (phrSet.has(i)) gcls += ' phr'; if (res.flu.mark[i] && res.flu.mark[i+1]) gcls += ' flu'; }
+    if (res && i < toks.length - 1) { if (vis('phr') && phrSet.has(i)) gcls += ' phr'; if (vis('flu') && res.flu.mark[i] && res.flu.mark[i+1]) gcls += ' flu'; }
     h += gcls ? `<span class="${gcls.trim()}">${esc(t.after)}</span>` : esc(t.after);
   });
   el.innerHTML = h;
@@ -1136,10 +1157,15 @@ function renderResult(p, r) {
   const { toks } = analyzeText(p.text);
   const cnt = { A: 0, B: 0, C: 0 }; r.words.forEach(w => cnt[w.g]++);
   $('#resMode').textContent = engineLabel(r.mode) + (r.mode === 'azure' && r.extra.azure && r.extra.azure.pron != null ? `（Azure総合 ${r.extra.azure.pron}）` : '');
-  $('#scores').innerHTML = `
-    <div class="sc"><div class="k">(1) 発音</div><div class="v">${r.scores.pron}</div><div class="s">A ${cnt.A}・B ${cnt.B}・C ${cnt.C}</div></div>
-    <div class="sc"><div class="k">(2) 流暢さ</div><div class="v">${r.wpm}<span style="font-size:14px"> WPM</span></div><div class="s">スコア ${r.scores.flu}・${r.span.toFixed(1)}秒</div></div>
-    <div class="sc"><div class="k">(3) 区切り・間</div><div class="v">${r.scores.phr}</div><div class="s">指摘 ${r.phr.length}か所</div></div>`;
+  const hidCard = k => `<div class="sc hid"><div class="k">${k}</div><div class="v">非表示</div><div class="s">&nbsp;</div></div>`;
+  $('#scores').innerHTML =
+    (vis('pron') ? `<div class="sc"><div class="k">(1) 発音</div><div class="v">${r.scores.pron}</div><div class="s">A ${cnt.A}・B ${cnt.B}・C ${cnt.C}</div></div>` : hidCard('(1) 発音')) +
+    (vis('flu') ? `<div class="sc"><div class="k">(2) 流暢さ</div><div class="v">${r.wpm}<span style="font-size:14px"> WPM</span></div><div class="s">スコア ${r.scores.flu}・${r.span.toFixed(1)}秒</div></div>` : hidCard('(2) 流暢さ')) +
+    (vis('phr') ? `<div class="sc"><div class="k">(3) 区切り・間</div><div class="v">${r.scores.phr}</div><div class="s">指摘 ${r.phr.length}か所</div></div>` : hidCard('(3) 区切り・間'));
+  const anyHidden = !vis('pron') || !vis('flu') || !vis('phr');
+  $('#revealBox').innerHTML = anyHidden ? '<button class="btn pri" id="btnReveal">評価を見る</button>' : '';
+  if (anyHidden) $('#btnReveal').onclick = () => { R.reveal = true; renderRead(); };
+  $('.legend').style.display = anyHidden ? 'none' : '';
   const uniq = g => { const s = new Map(); r.words.forEach((w, i) => { if (w.g === g && !w.om) { const k = toks[i].text.toLowerCase(); if (!s.has(k)) s.set(k, { t: toks[i].text, w }); } }); return [...s.values()]; };
   const C = uniq('C'), B = uniq('B'), om = r.words.map((w, i) => w.om ? toks[i].text : null).filter(Boolean);
   const chip = (x, g) => `<span class="chipw ${g}">${esc(x.t)} <small>${x.w.sc}点</small></span>`;
@@ -1152,15 +1178,22 @@ function renderResult(p, r) {
     return `<li>${s}</li>`;
   };
   const words = (a, b) => toks.slice(a, b + 1).map(t => t.text).join(' ');
-  let d = '<h3>(1) 発音</h3>';
+  let d = '';
+  if (vis('pron')) {
+  d += '<h3>(1) 発音</h3>';
   if (!C.length && !B.length && !om.length) d += '<div>すべての単語が問題なく通じる発音です。</div>';
   if (C.length) d += `<div>明らかに誤っている（赤）</div><ul>${C.map(x => item(x, 'C')).join('')}</ul>`;
   if (B.length) d += `<div>通じない可能性がある（緑）</div><ul>${B.map(x => item(x, 'B')).join('')}</ul>`;
   if (om.length) d += `<div class="muted">読み飛ばし・聞き取れなかった語：${esc(om.join(', '))}</div>`;
+  }
+  if (vis('flu')) {
   d += `<h3>(2) 流暢さ</h3><div>読む速さ：<b>${r.wpm} WPM</b>（1分あたりの語数。目安：中学生 80〜110、高校生 100〜140、ネイティブ 150前後）</div>`;
   d += r.flu.notes.length ? `<ul>${r.flu.notes.map(n => `<li><span class="lg-y">${esc(words(n.a, n.b))}</span>：${esc(n.reason)}</li>`).join('')}</ul>` : '<div>流暢さが落ちている部分はありません。</div>';
+  }
+  if (vis('phr')) {
   d += '<h3>(3) 区切り・間</h3>';
   d += r.phr.length ? `<ul>${r.phr.map(f => `<li>${esc(f.msg)}</li>`).join('')}</ul>` : '<div>不自然な区切りはありません。</div>';
+  }
   if (r.mode === 'browser') d += '<p class="muted">※ 簡易評価はブラウザの音声認識と音量から推定した目安です。より正確な評価には、設定でAzureを使ってください。</p>';
   $('#resDetail').innerHTML = d;
 }
@@ -1172,6 +1205,7 @@ function abortRecording() {
   if (R.br) { try { R.br.active = false; R.br.r.abort(); } catch (e) {} R.br = null; }
 }
 $('#btnListen').addEventListener('click', startListening);
+Object.entries(SHOW_KEYS).forEach(([k, id]) => $('#' + id).addEventListener('change', e => { S().show = Object.assign({}, S().show, { [k]: e.target.checked }); saveDB(); }));
 $('#btnStop').addEventListener('click', () => stopListening());
 $('#btnAgain').addEventListener('click', () => { stopAllPlayback(); R.phase = 'idle'; R.result = null; R.playMode = null; R.err = ''; renderRead(); $('#readText').scrollIntoView({ block: 'center', behavior: 'smooth' }); });
 
@@ -1255,7 +1289,7 @@ async function stopListening() {
       if (!hyp.length) throw new Error('英語が聞き取れませんでした。マイクに向かって、もう一度はっきり読んでください。');
       result = evalBrowser(p, hyp, data);
     }
-    R.result = result; R.audio = data; R.audioBuf = null; R.phase = 'result'; R.playMode = null;
+    R.result = result; R.audio = data; R.audioBuf = null; R.phase = 'result'; R.playMode = null; R.reveal = false;
     saveAttempt(p, result);
   } catch (e) {
     console.error(e);
@@ -1592,7 +1626,7 @@ function renderSettings() {
   segSet('#segEngine', st.engine);
   $('#azKey').value = st.azureKey; $('#azRegion').value = st.azureRegion; $('#azVoice').value = st.azureVoice;
   $('#aiProv').value = st.aiProvider; $('#aiKey').value = st.aiKey; $('#aiModel').value = st.aiModel;
-  $('#aiModel').placeholder = st.aiProvider === 'openai' ? '既定：gpt-4.1-mini' : '既定：claude-haiku-4-5';
+  $('#aiModel').placeholder = st.aiProvider === 'openai' ? '既定：gpt-4.1-mini' : st.aiProvider === 'gemini' ? '既定：gemini-flash-latest' : '既定：claude-haiku-4-5';
   const m = engineMode();
   $('#engineNote').innerHTML = `現在の評価方式：<b>${m === 'azure' ? 'Azure（高精度）' : m === 'browser' ? '簡易（ブラウザの音声認識）' : '使用できません'}</b>` +
     (SRClass ? '' : '<br>このブラウザは簡易モードの音声認識に対応していません（Chrome・Edge・Safariは対応）。') +
