@@ -819,9 +819,13 @@ function detectFluency(toks, words, pauses, inserts, mode) {
     rates.forEach(c => { if (c.r < med * 0.62 && c.dur > 0.6) { for (let i = c.x; i <= c.y; i++) mark[i] = true; addNote(c.x, c.y, `ほかの部分より読む速さが落ちています（${(c.r).toFixed(1)}音節/秒）`); } });
   }
   if (mode === 'azure') {
-    const per = []; words.forEach((w, i) => { if (!w.om && w.en > w.st) per.push((w.en - w.st) / toks[i].syl); });
+    // words before a period/comma (and the last word) are naturally lengthened in English, so they are not judged here.
+    // duration is normalised by the number of sounds (phonemes), not syllables, so short words like "six" are fair.
+    const unit = i => Math.max(1, (words[i].ph && words[i].ph.length) || Math.round(toks[i].text.length * 0.8));
+    const finalPos = i => i === n - 1 || ['strong', 'comma'].includes(bType(toks, i));
+    const per = []; words.forEach((w, i) => { if (!w.om && w.en > w.st && !finalPos(i)) per.push((w.en - w.st) / unit(i)); });
     const med = median(per);
-    words.forEach((w, i) => { if (!w.om && w.en > w.st) { const d = w.en - w.st; if (d / toks[i].syl > med * 2.4 && d > 0.45 && !mark[i]) { mark[i] = true; addNote(i, i, '一語だけ引き伸ばされています'); } } });
+    if (per.length >= 4) words.forEach((w, i) => { if (!w.om && w.en > w.st && !finalPos(i)) { const d = w.en - w.st; if (d / unit(i) > med * 2.5 && d > 0.5 && !mark[i]) { mark[i] = true; addNote(i, i, 'この語だけ極端にゆっくり（音を引き伸ばして）読んでいます'); } } });
   }
   (inserts || []).forEach(ins => {
     const x = Math.max(0, ins.after), y = Math.min(n - 1, ins.after + 1);
