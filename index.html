@@ -773,7 +773,7 @@ function detectPhrasing(toks, words, pauses, mode, azureBreaks) {
     if (words[k].om || words[k+1].om) continue;
     const p = pauses[k], bt = bType(toks, k), a = toks[k].text, b = toks[k+1].text;
     if (bt === 'forbid' && p >= 0.3) { flags.push({ k, kind: 'unexpected', p, msg: `「${a} ／ ${b}」：「${a}」の直後で区切っています（${p.toFixed(1)}秒）。「${a} ${b}」は続けて読みましょう。` }); seen.add(k); }
-    else if (bt === 'neutral' && p >= 0.55) { flags.push({ k, kind: 'unexpected', p, msg: `「${a} ／ ${b}」：意味のまとまりの途中で間があります（${p.toFixed(1)}秒）。` }); seen.add(k); }
+    else if (bt === 'neutral' && p >= 0.5) { flags.push({ k, kind: 'unexpected', p, msg: `「${a} ／ ${b}」：意味のまとまりの途中で間があります（${p.toFixed(1)}秒）。` }); seen.add(k); }
     else if (bt === 'strong' && p < (mode === 'azure' ? 0.12 : 0.1)) { const pu = toks[k].after.trim().charAt(0); flags.push({ k, kind: 'missing', p, msg: `「${a}${pu} ／ ${b}」：文や意味の切れ目です。「${pu}」の後で一呼吸おきましょう。` }); seen.add(k); }
   }
   if (azureBreaks) {
@@ -876,15 +876,19 @@ function evalBrowser(passage, hypWords, rec) {
 }
 
 // Azure evaluation from SDK segments
-function evalAzure(passage, segs) {
+function evalAzure(passage, segs, rec) {
   const { toks } = analyzeText(passage.text);
   const hyp = []; const nb = [];
   segs.forEach(sg => {
     const best = sg.NBest && sg.NBest[0]; if (!best) return;
     nb.push(best.PronunciationAssessment || {});
+    // word offsets should be from the start of the audio; if they look relative to this segment, shift them
+    const segOff = sg.Offset || 0, ws = (best.Words || []).filter(w => w.Offset != null);
+    const shift = ws.length && segOff > 0 && ws[0].Offset < segOff - 2e6 ? segOff : 0;
     (best.Words || []).forEach(w => {
       const pa = w.PronunciationAssessment || {};
       if (pa.ErrorType === 'Omission') return;
+      if (shift && w.Offset != null) w = Object.assign({}, w, { Offset: w.Offset + shift });
       const br = pa.Feedback && pa.Feedback.Prosody && pa.Feedback.Prosody.Break;
       hyp.push({ w: w.Word, st: (w.Offset || 0) / 1e7, en: ((w.Offset || 0) + (w.Duration || 0)) / 1e7, sc: pa.AccuracyScore ?? 0, err: pa.ErrorType || 'None', brk: br && br.ErrorTypes ? br.ErrorTypes : [], ph: (w.Phonemes || []).map(p => ({ p: p.Phoneme, s: p.PronunciationAssessment ? p.PronunciationAssessment.AccuracyScore : null })) });
     });
@@ -907,6 +911,17 @@ function evalAzure(passage, segs) {
   for (let k = 0; k < toks.length - 1; k++) {
     const a = words[k], b = words[k+1];
     pauses.push(!a.om && !b.om ? Math.max(0, b.st - a.en) : 0);
+  }
+  // cross-check with the recorded audio: the recognizer tends to stretch word edges into silence,
+  // so also measure the longest silence between the middles of the two words
+  if (rec && rec.rms && rec.rms.length) {
+    const vs = vadSegments(rec.rms, rec.frameSec), sil = vs.slice(1).map((s, j) => [vs[j].en, s.st]);
+    for (let k = 0; k < toks.length - 1; k++) {
+      const a = words[k], b = words[k+1]; if (a.om || b.om) continue;
+      const lo = (a.st + a.en) / 2, hi = (b.st + b.en) / 2;
+      let best = 0; for (const [s0, s1] of sil) { const ov = Math.min(s1, hi) - Math.max(s0, lo); if (ov > best) best = ov; }
+      if (best > pauses[k]) pauses[k] = best;
+    }
   }
   const inserts = ins.filter(x => x.after >= 0 && x.after < toks.length - 1).map(x => ({ after: x.after, w: hyp[x.h].w }));
   const avg = k => { const v = nb.map(x => x[k]).filter(x => typeof x === 'number'); return v.length ? Math.round(v.reduce((a, b) => a + b, 0) / v.length) : null; };
@@ -1233,7 +1248,7 @@ async function stopListening() {
     if (data.duration < 0.6) throw new Error('録音が短すぎます。');
     if (R.mode === 'azure') {
       const segs = await azureAssess(to16kInt16(data.pcm, data.sr), p.text.replace(/\s+/g, ' '));
-      result = evalAzure(p, segs);
+      result = evalAzure(p, segs, data);
     } else {
       const hyp = br ? await br.stop() : [];
       if (br && br.fatal && !hyp.length) throw new Error('音声認識が使えませんでした（' + br.fatal + '）。ブラウザの設定を確認するか、設定でAzureを使ってください。');
