@@ -632,6 +632,7 @@ async function azureAssess(int16, refText) {
   const rec = new SDK.SpeechRecognizer(sc, SDK.AudioConfig.fromStreamInput(ps));
   const pac = new SDK.PronunciationAssessmentConfig(refText, SDK.PronunciationAssessmentGradingSystem.HundredMark, SDK.PronunciationAssessmentGranularity.Phoneme, true);
   try { pac.enableProsodyAssessment = true; } catch (e) {}
+  try { pac.phonemeAlphabet = 'IPA'; } catch (e) {}
   pac.applyTo(rec);
   return new Promise((resolve, reject) => {
     const segs = []; let done = false;
@@ -715,6 +716,11 @@ function mapBoundsToTokens(toks, bounds, totalDur) {
 
 /* ================= analysis ================= */
 function gradeFromScore(sc) { return sc >= 80 ? 'A' : sc >= 60 ? 'B' : 'C'; }
+// Azure phoneme names (SAPI) -> IPA, and short Japanese tips for sounds Japanese learners often miss
+const SAPI_IPA = { aa: 'ɑ', ae: 'æ', ah: 'ʌ', ao: 'ɔ', aw: 'aʊ', ax: 'ə', ay: 'aɪ', b: 'b', ch: 'tʃ', d: 'd', dh: 'ð', eh: 'ɛ', er: 'ɝ', ey: 'eɪ', f: 'f', g: 'g', h: 'h', hh: 'h', ih: 'ɪ', iy: 'i', jh: 'dʒ', k: 'k', l: 'l', m: 'm', n: 'n', ng: 'ŋ', ow: 'oʊ', oy: 'ɔɪ', p: 'p', r: 'r', s: 's', sh: 'ʃ', t: 't', th: 'θ', uh: 'ʊ', uw: 'u', v: 'v', w: 'w', y: 'j', z: 'z', zh: 'ʒ' };
+const PH_TIP = { 'f': '下唇に上の歯を軽く当てて息を出す', 'v': '下唇に上の歯を当てて声を出す', 'θ': '舌先を上の歯に軽く当てて息を出す', 'ð': '舌先を上の歯に当てて声を出す', 'r': '舌先をどこにも付けず、少し後ろに引く', 'ɹ': '舌先をどこにも付けず、少し後ろに引く', 'l': '舌先を上の歯ぐきにしっかり付ける', 'æ': '「エ」の口で「ア」と言う', 'ə': '力を抜いて弱く短く', 'ʌ': '口を小さめに開けて短い「ア」', 'ɝ': '舌を丸めてこもった「アー」', 'ɚ': '舌を丸めてこもった「ア」', 'ɪ': '短く、「イ」と「エ」の間', 'ʊ': '短く、唇をあまり丸めない「ウ」', 'w': '唇を丸めて突き出す', 'ʃ': '唇を丸めて「シュ」', 'z': '「ズ」を濁らせ、ツにならないように', 'ŋ': '最後の「グ」を言わず鼻に抜く', 't': '母音を付けて「ト」にしない', 'd': '母音を付けて「ド」にしない', 'k': '母音を付けて「ク」にしない', 's': '母音を付けて「ス」にしない' };
+function ipa(p) { const k = String(p || '').toLowerCase(); return SAPI_IPA[k] || p; }
+function weakPh(w) { return (w.ph || []).filter(x => typeof x.s === 'number' && x.s < 60).map(x => ({ p: ipa(x.p), s: Math.round(x.s) })); }
 
 // Build timed words for browser mode using VAD segments + syllable distribution
 function timeWordsFromVAD(toks, words, segs) {
@@ -876,7 +882,7 @@ function evalAzure(passage, segs) {
       const pa = w.PronunciationAssessment || {};
       if (pa.ErrorType === 'Omission') return;
       const br = pa.Feedback && pa.Feedback.Prosody && pa.Feedback.Prosody.Break;
-      hyp.push({ w: w.Word, st: (w.Offset || 0) / 1e7, en: ((w.Offset || 0) + (w.Duration || 0)) / 1e7, sc: pa.AccuracyScore ?? 0, err: pa.ErrorType || 'None', brk: br && br.ErrorTypes ? br.ErrorTypes : [] });
+      hyp.push({ w: w.Word, st: (w.Offset || 0) / 1e7, en: ((w.Offset || 0) + (w.Duration || 0)) / 1e7, sc: pa.AccuracyScore ?? 0, err: pa.ErrorType || 'None', brk: br && br.ErrorTypes ? br.ErrorTypes : [], ph: (w.Phonemes || []).map(p => ({ p: p.Phoneme, s: p.PronunciationAssessment ? p.PronunciationAssessment.AccuracyScore : null })) });
     });
   });
   if (!hyp.length) throw new Error('英語の音声が聞き取れませんでした。もう一度、はっきり読んでみてください。');
@@ -889,7 +895,7 @@ function evalAzure(passage, segs) {
     let sc = h.sc; if (m.sim < 0.55) sc = Math.min(sc, 40);
     let g = gradeFromScore(sc); if (h.err === 'Mispronunciation' && g === 'A') g = 'B';
     (h.brk || []).forEach(b => { if (b === 'UnexpectedBreak') breaks.push({ i, kind: 'unexpected' }); if (b === 'MissingBreak') breaks.push({ i, kind: 'missing' }); });
-    return { g, sc: Math.round(sc), st: h.st, en: h.en, heard: h.w };
+    return { g, sc: Math.round(sc), st: h.st, en: h.en, heard: h.w, ph: h.ph };
   });
   // give omitted words a position for playback
   words.forEach((w, i) => { if (w.om) { const prev = words.slice(0, i).reverse().find(x => x.en != null); w.st = w.en = prev ? prev.en : 0; } });
@@ -1098,7 +1104,7 @@ function renderPassage(el, p, res) {
       if (w.g === 'B') cls += ' gB'; if (w.g === 'C') cls += ' gC'; if (w.om) cls += ' om';
       if (res.flu.mark[i]) cls += ' flu';
       if (phrSet.has(i) || phrSet.has(i - 1)) cls += ' phr';
-      title = w.om ? '読み飛ばし／聞き取れず' : `発音 ${w.sc}点` + (w.heard && canon(w.heard) !== t.c ? `（「${w.heard}」と聞こえました）` : '');
+      title = w.om ? '読み飛ばし／聞き取れず' : `発音 ${w.sc}点` + (weakPh(w).length ? '／弱い音：' + weakPh(w).map(x => '/' + x.p + '/').join(' ') : '') + (w.heard && canon(w.heard) !== t.c ? `（「${w.heard}」と聞こえました）` : '');
     }
     h += `<span class="${cls}" data-i="${i}"${title ? ` title="${esc(title)}"` : ''}>${esc(t.text)}</span>`;
     let gcls = '';
@@ -1117,12 +1123,20 @@ function renderResult(p, r) {
     <div class="sc"><div class="k">(3) 区切り・間</div><div class="v">${r.scores.phr}</div><div class="s">指摘 ${r.phr.length}か所</div></div>`;
   const uniq = g => { const s = new Map(); r.words.forEach((w, i) => { if (w.g === g && !w.om) { const k = toks[i].text.toLowerCase(); if (!s.has(k)) s.set(k, { t: toks[i].text, w }); } }); return [...s.values()]; };
   const C = uniq('C'), B = uniq('B'), om = r.words.map((w, i) => w.om ? toks[i].text : null).filter(Boolean);
-  const chip = (x, g) => `<span class="chipw ${g}" title="${esc(x.w.heard ? '「' + x.w.heard + '」と聞こえました' : '')}">${esc(x.t)} <small>${x.w.sc}</small></span>`;
+  const chip = (x, g) => `<span class="chipw ${g}">${esc(x.t)} <small>${x.w.sc}点</small></span>`;
+  const item = (x, g) => {
+    const wp = weakPh(x.w);
+    let s = chip(x, g);
+    if (x.w.heard && canon(x.w.heard) !== canon(x.t)) s += ` 「${esc(x.w.heard)}」と聞こえました。`;
+    if (wp.length) s += ' 弱い音：' + wp.map(p => `<b>/${esc(p.p)}/</b>(${p.s}点)` + (PH_TIP[p.p] ? `…${esc(PH_TIP[p.p])}` : '')).join('、');
+    else if (r.mode === 'azure') s += ' 単語全体の発音が不明瞭です。';
+    return `<li>${s}</li>`;
+  };
   const words = (a, b) => toks.slice(a, b + 1).map(t => t.text).join(' ');
   let d = '<h3>(1) 発音</h3>';
   if (!C.length && !B.length && !om.length) d += '<div>すべての単語が問題なく通じる発音です。</div>';
-  if (C.length) d += `<div>明らかに誤っている（赤）：${C.map(x => chip(x, 'C')).join('')}</div>`;
-  if (B.length) d += `<div>通じない可能性がある（緑）：${B.map(x => chip(x, 'B')).join('')}</div>`;
+  if (C.length) d += `<div>明らかに誤っている（赤）</div><ul>${C.map(x => item(x, 'C')).join('')}</ul>`;
+  if (B.length) d += `<div>通じない可能性がある（緑）</div><ul>${B.map(x => item(x, 'B')).join('')}</ul>`;
   if (om.length) d += `<div class="muted">読み飛ばし・聞き取れなかった語：${esc(om.join(', '))}</div>`;
   d += `<h3>(2) 流暢さ</h3><div>読む速さ：<b>${r.wpm} WPM</b>（1分あたりの語数。目安：中学生 80〜110、高校生 100〜140、ネイティブ 150前後）</div>`;
   d += r.flu.notes.length ? `<ul>${r.flu.notes.map(n => `<li><span class="lg-y">${esc(words(n.a, n.b))}</span>：${esc(n.reason)}</li>`).join('')}</ul>` : '<div>流暢さが落ちている部分はありません。</div>';
