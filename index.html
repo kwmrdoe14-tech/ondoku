@@ -492,14 +492,19 @@ function getAC() { if (!AC || AC.state === 'closed') { const C = window.AudioCon
 class Recorder {
   constructor() { this.chunks = []; this.rms = []; this.hop = 0; this.onFrame = null; }
   async start() {
-    this.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
-    const ctx = getAC(); await ctx.resume();
+    this.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+    // Safari: an AudioContext created before getUserMedia can capture only silence,
+    // so use a fresh context dedicated to recording, created after the mic is open.
+    const C = window.AudioContext || window.webkitAudioContext;
+    const ctx = this.ctx = new C();
+    try { await ctx.resume(); } catch (e) {}
     this.sr = ctx.sampleRate; this.hop = Math.round(this.sr * 0.01);
     this.src = ctx.createMediaStreamSource(this.stream);
     this.proc = ctx.createScriptProcessor(4096, 1, 1);
-    this.mute = ctx.createGain(); this.mute.gain.value = 0;
-    this.src.connect(this.proc); this.proc.connect(this.mute); this.mute.connect(ctx.destination);
+    this.src.connect(this.proc); this.proc.connect(ctx.destination);
+    this.frames = 0; this.maxAbs = 0;
     this.proc.onaudioprocess = e => {
+      this.frames++;
       const d = new Float32Array(e.inputBuffer.getChannelData(0));
       this.chunks.push(d);
       let peak = 0;
@@ -508,7 +513,7 @@ class Recorder {
       let k = 0;
       for (; k + this.hop <= buf.length; k += this.hop) {
         let s = 0; for (let q = k; q < k + this.hop; q++) s += buf[q] * buf[q];
-        const r = Math.sqrt(s / this.hop); this.rms.push(r); if (r > peak) peak = r;
+        const r = Math.sqrt(s / this.hop); this.rms.push(r); if (r > peak) peak = r; if (r > this.maxAbs) this.maxAbs = r;
       }
       this.rest = buf.slice(k);
       if (this.onFrame) this.onFrame(peak);
@@ -516,8 +521,9 @@ class Recorder {
     this.t0 = performance.now();
   }
   stop() {
-    try { this.proc.disconnect(); this.src.disconnect(); this.mute.disconnect(); } catch (e) {}
+    try { this.proc.onaudioprocess = null; this.proc.disconnect(); this.src.disconnect(); } catch (e) {}
     try { this.stream.getTracks().forEach(t => t.stop()); } catch (e) {}
+    try { this.ctx.close(); } catch (e) {}
     const len = this.chunks.reduce((a, c) => a + c.length, 0), pcm = new Float32Array(len);
     let o = 0; for (const c of this.chunks) { pcm.set(c, o); o += c.length; }
     this.chunks = [];
@@ -1132,7 +1138,6 @@ $('#btnAgain').addEventListener('click', () => { stopAllPlayback(); R.phase = 'i
 
 async function startListening() {
   const p = curP(); if (!p) return;
-  try { getAC().resume(); } catch (e) {}
   const mode = engineMode();
   if (mode === 'none-azure') { R.err = 'Azureのキーとリージョンが設定されていません（設定タブ）。'; return renderRead(); }
   if (mode === 'none-browser') { R.err = 'このブラウザは音声認識（簡易モード）に対応していません。Chrome・Edge・Safariを使うか、設定でAzureのキーを入力してください。'; return renderRead(); }
@@ -1142,7 +1147,8 @@ async function startListening() {
   const rec = new Recorder();
   try { await rec.start(); }
   catch (e) { R.err = 'マイクを使えませんでした。ブラウザのマイク許可を確認してください。'; return renderRead(); }
-  R.rec = rec; R.phase = 'rec'; R.result = null; R.playMode = null;
+  R.rec = rec; R.phase = 'rec'; R.result = null; R.playMode = null; R.micWarned = false;
+  const mw = $('#micWarn'); if (mw) mw.remove();
   renderRead();
   const { toks } = analyzeText(p.text);
   const totalSyl = toks.reduce((a, t) => a + t.syl, 0);
@@ -1167,6 +1173,10 @@ async function startListening() {
   R.timers.push(setInterval(() => {
     if (R.phase !== 'rec') return;
     const el = (performance.now() - t0) / 1000; $('#recTime').textContent = el.toFixed(1);
+    if (!R.micWarned && el > 2.5 && (rec.frames === 0 || rec.maxAbs < 0.0005)) {
+      R.micWarned = true;
+      $('#stRec').insertAdjacentHTML('beforeend', '<div class="warnbox" id="micWarn" style="margin-top:10px;text-align:left">マイクの音が届いていません。<br>・Mac：システム設定 → プライバシーとセキュリティ → マイク で、使っているブラウザがオンか確認<br>・システム設定 → サウンド → 入力 で、使うマイクが選ばれていて入力音量が0でないか確認<br>・Safari：メニューの Safari → 設定 → Webサイト → マイク で、このサイトが「許可」か確認<br>確認したら「聞き取り終わり」を押して、もう一度お試しください。</div>');
+    }
     const rms = rec.rms; if (rms.length < 50) return;
     const sorted = Float32Array.from(rms).sort(), noise = sorted[Math.floor(sorted.length * 0.1)], loud = sorted[Math.floor(sorted.length * 0.95)];
     const thr = Math.max(noise * 2.5, noise + (loud - noise) * 0.15, 0.006);
