@@ -492,9 +492,11 @@ function getAC() { if (!AC || AC.state === 'closed') { const C = window.AudioCon
 class Recorder {
   constructor() { this.chunks = []; this.rms = []; this.hop = 0; this.onFrame = null; }
   // ctx must be created synchronously inside the click handler (Safari needs a user gesture to run it)
-  async start(ctx) {
-    this.ctx = ctx;
-    this.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+  async start(ctx, simple) {
+    this.ctx = ctx; this.simple = !!simple; this.t0s = performance.now(); this.endedAt = null;
+    this.stream = await navigator.mediaDevices.getUserMedia(simple ? { audio: true } : { audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+    const tr = this.stream.getAudioTracks()[0];
+    if (tr) tr.addEventListener('ended', () => { if (this.endedAt == null) this.endedAt = ((performance.now() - this.t0s) / 1000).toFixed(1); });
     try { await Promise.race([ctx.resume(), sleep(800)]); } catch (e) {}
     this.sr = ctx.sampleRate; this.hop = Math.round(this.sr * 0.01);
     this.src = ctx.createMediaStreamSource(this.stream);
@@ -520,12 +522,13 @@ class Recorder {
   }
   diag() {
     const t = this.stream && this.stream.getAudioTracks()[0];
-    return 'frames=' + this.frames + ' max=' + (this.maxAbs || 0).toFixed(4) + ' ctx=' + (this.ctx && this.ctx.state) + ' sr=' + this.sr + ' track=' + (t ? t.readyState + '/' + (t.muted ? 'muted' : 'unmuted') + '/' + (t.enabled ? 'enabled' : 'disabled') + '/' + t.label : 'none');
+    return 'frames=' + this.frames + ' max=' + (this.maxAbs || 0).toFixed(4) + ' ctx=' + (this.ctx && this.ctx.state) + ' sr=' + this.sr + ' track=' + (t ? t.readyState + '/' + (t.muted ? 'muted' : 'unmuted') + '/' + (t.enabled ? 'enabled' : 'disabled') + '/' + t.label : 'none') + ' endedAt=' + this.endedAt + (this.simple ? ' retry' : '');
   }
-  stop() {
+  trackEnded() { const t = this.stream && this.stream.getAudioTracks()[0]; return !t || t.readyState === 'ended'; }
+  stop(keepCtx) {
     try { this.proc.onaudioprocess = null; this.proc.disconnect(); this.src.disconnect(); } catch (e) {}
     try { this.stream.getTracks().forEach(t => t.stop()); } catch (e) {}
-    try { this.ctx.close(); } catch (e) {}
+    if (!keepCtx) { try { this.ctx.close(); } catch (e) {} }
     this.stopped = true;
     const len = this.chunks.reduce((a, c) => a + c.length, 0), pcm = new Float32Array(len);
     let o = 0; for (const c of this.chunks) { pcm.set(c, o); o += c.length; }
@@ -1147,10 +1150,15 @@ async function startListening() {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { R.err = 'この環境ではマイクが使えません（https でアクセスしているか確認してください）。'; return renderRead(); }
   stopAllPlayback(); R.err = ''; R.mode = mode;
   if (mode === 'azure') loadSDK().catch(() => {});
-  const rec = new Recorder();
+  let rec = new Recorder();
   const RC = window.AudioContext || window.webkitAudioContext;
   const recCtx = new RC(); try { recCtx.resume(); } catch (e) {}
-  try { await rec.start(recCtx); }
+  try {
+    await rec.start(recCtx);
+    // Safari sometimes ends the mic track right away; retry once with plain constraints
+    await sleep(600);
+    if (rec.trackEnded()) { rec.stop(true); rec = new Recorder(); await rec.start(recCtx, true); }
+  }
   catch (e) { try { recCtx.close(); } catch (x) {} R.err = 'マイクを使えませんでした。ブラウザのマイク許可を確認してください。（' + (e && e.name || e) + '）'; return renderRead(); }
   R.rec = rec; R.phase = 'rec'; R.result = null; R.playMode = null; R.micWarned = false;
   const mw = $('#micWarn'); if (mw) mw.remove();
@@ -1180,7 +1188,7 @@ async function startListening() {
     const el = (performance.now() - t0) / 1000; $('#recTime').textContent = el.toFixed(1);
     if (!R.micWarned && el > 2.5 && (rec.frames === 0 || rec.maxAbs < 0.0005)) {
       R.micWarned = true;
-      $('#stRec').insertAdjacentHTML('beforeend', '<div class="warnbox" id="micWarn" style="margin-top:10px;text-align:left">マイクの音が届いていません。<br>・Chrome・Edgeの場合：システム設定 → プライバシーとセキュリティ → マイク で、そのブラウザがオンか確認<br>・システム設定 → サウンド → 入力 で、使うマイクが選ばれていて入力音量が0でないか確認<br>・Safari：メニューの Safari → 設定 → Webサイト → マイク で、このサイトが「許可」か確認<br>確認したら「聞き取り終わり」を押して、もう一度お試しください。<br><span class="muted">診断情報：' + esc(rec.diag()) + '</span></div>');
+      $('#stRec').insertAdjacentHTML('beforeend', '<div class="warnbox" id="micWarn" style="margin-top:10px;text-align:left">マイクの音が届いていません。<br>' + (rec.trackEnded() ? '・マイクが途中で止められました。ほかのタブ（このアプリを複数開いている場合を含む）やアプリ（Zoom・Meet・Chrome など）がマイクを使っていないか確認し、閉じてからページを再読み込みしてください<br>' : '') + '・Chrome・Edgeの場合：システム設定 → プライバシーとセキュリティ → マイク で、そのブラウザがオンか確認<br>・システム設定 → サウンド → 入力 で、使うマイクが選ばれていて入力音量が0でないか確認<br>・Safari：メニューの Safari → 設定 → Webサイト → マイク で、このサイトが「許可」か確認<br>確認したら「聞き取り終わり」を押して、もう一度お試しください。<br><span class="muted">診断情報：' + esc(rec.diag()) + '</span></div>');
       if (rec.ctx && rec.ctx.state !== 'running') { try { rec.ctx.resume(); } catch (e) {} }
     }
     const rms = rec.rms; if (rms.length < 50) return;
