@@ -992,7 +992,10 @@ async function aiGenerate(passage) {
   const prompt = `あなたは日本の中学・高校生向けの英語教材を作る先生です。次の英文について、(1)各文の自然な日本語訳、(2)単語テスト用の語彙リスト を作ってください。
 
 語彙リストのルール：
-- 冠詞・代名詞・be動詞・基本的な前置詞/接続詞/助動詞などの機能語と、人名などの固有名詞は除く。それ以外の内容語は本文からすべて取り出す（重複なし）。
+- 固有名詞（人名・地名・国名・言語名・国籍・曜日・月・祝日・学校名・組織名・商品名・作品名など）は絶対に含めない。
+- 英検3級以上のレベルの単語だけを選ぶ。英検5級・4級レベルのやさしい語（例：go, school, friend, big, like, many, walk, talk など）は含めない。
+- 冠詞・代名詞・be動詞・基本的な前置詞/接続詞/助動詞などの機能語も含めない。
+- 上の条件に合う語は、本文からすべて取り出す（重複なし）。該当する語がなければ "vocab" は空の配列でよい。
 - "word" は本文に出てくる形のまま（小文字。ただし固有の大文字は保持）。
 - "ja" は本文の文脈での意味を簡潔な日本語で（15字以内）。
 - "pos" は品詞（名詞/動詞/形容詞/副詞/熟語など）。
@@ -1037,7 +1040,14 @@ ${sents.map((s, i) => `${i + 1}. ${s.text}`).join('\n')}`;
   }
   const a = text.indexOf('{'), b = text.lastIndexOf('}');
   const data = JSON.parse(text.slice(a, b + 1));
-  const vocab = (data.vocab || []).filter(v => v && v.word && v.ja).map(v => ({ w: String(v.word).trim(), pos: v.pos || '', ja: String(v.ja).trim(), dj: (v.dj || []).slice(0, 5).map(String), de: (v.de || []).slice(0, 5).map(String) }));
+  // safety net: drop proper nouns (words that only ever appear capitalized in the middle of a sentence)
+  const { toks } = analyzeText(passage.text);
+  const isProper = w => {
+    const occ = toks.filter(t => t.norm === normWord(String(w).split(/\s+/)[0]));
+    if (!occ.length) return /^[A-Z]/.test(w);
+    return occ.every(t => /^[A-Z]/.test(t.text)) && occ.some(t => t.i > 0 && !/[.!?]/.test(toks[t.i - 1].after));
+  };
+  const vocab = (data.vocab || []).filter(v => v && v.word && v.ja && !isProper(String(v.word).trim())).map(v => ({ w: String(v.word).trim(), pos: v.pos || '', ja: String(v.ja).trim(), dj: (v.dj || []).slice(0, 5).map(String), de: (v.de || []).slice(0, 5).map(String) }));
   return { vocab, sentJa: (data.sentences || []).map(String) };
 }
 
